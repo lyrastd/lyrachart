@@ -116,6 +116,119 @@ var diagramSchema = {
   },
   required: ["title", "type", "nodes", "edges", "mermaid", "d2", "markdown", "htmlSystem"]
 };
+var chatResponseSchema = {
+  type: import_genai.Type.OBJECT,
+  properties: {
+    replyText: { type: import_genai.Type.STRING, description: "Detailed conversational response in Portuguese. Introduce yourself, ask questions, explain what you will generate, or guide the user dynamically." },
+    actionTrigger: { type: import_genai.Type.STRING, description: "Must be: 'none' (just chat/explain/ask more info), 'generate' (make a whole new diagram), 'refactor' (modify/add to the active diagram), or 'prototype' (only update mockup htmlSystem)." },
+    diagram: {
+      type: import_genai.Type.OBJECT,
+      description: "Required ONLY if actionTrigger is 'generate' or 'refactor'.",
+      properties: {
+        title: { type: import_genai.Type.STRING },
+        type: { type: import_genai.Type.STRING },
+        nodes: {
+          type: import_genai.Type.ARRAY,
+          items: {
+            type: import_genai.Type.OBJECT,
+            properties: {
+              id: { type: import_genai.Type.STRING },
+              type: { type: import_genai.Type.STRING },
+              label: { type: import_genai.Type.STRING },
+              x: { type: import_genai.Type.NUMBER },
+              y: { type: import_genai.Type.NUMBER },
+              shape: { type: import_genai.Type.STRING },
+              color: { type: import_genai.Type.STRING },
+              properties: {
+                type: import_genai.Type.ARRAY,
+                items: { type: import_genai.Type.STRING }
+              }
+            },
+            required: ["id", "type", "label", "x", "y", "shape", "color"]
+          }
+        },
+        edges: {
+          type: import_genai.Type.ARRAY,
+          items: {
+            type: import_genai.Type.OBJECT,
+            properties: {
+              id: { type: import_genai.Type.STRING },
+              from: { type: import_genai.Type.STRING },
+              to: { type: import_genai.Type.STRING },
+              label: { type: import_genai.Type.STRING },
+              type: { type: import_genai.Type.STRING },
+              cardinality: { type: import_genai.Type.STRING },
+              animated: { type: import_genai.Type.BOOLEAN }
+            },
+            required: ["id", "from", "to"]
+          }
+        },
+        mermaid: { type: import_genai.Type.STRING },
+        d2: { type: import_genai.Type.STRING },
+        markdown: { type: import_genai.Type.STRING },
+        htmlSystem: { type: import_genai.Type.STRING }
+      },
+      required: ["title", "type", "nodes", "edges", "mermaid", "d2", "markdown", "htmlSystem"]
+    },
+    htmlSystem: { type: import_genai.Type.STRING, description: "Required ONLY if actionTrigger is 'prototype'. A beautifully polished standalone web application with mock state and records." }
+  },
+  required: ["replyText", "actionTrigger"]
+};
+var CHAT_SYSTEM_INSTRUCTIONS = `You are "Lyra Dev AI", an elite full-stack developer and system architect who is helping the user design, refactor and prototype operational systems. 
+
+Your goals during the chat conversation:
+1. Act as a human developer consultant: Speak directly in Brazilian Portuguese, ask clarifying questions when requirements are vague, summarize what you will build prior to or during building, and guide the user's design.
+2. If the user's request is ambiguous or is a high-level discussion (e.g. they say "I want to build an e-commerce platform"), do NOT build it immediately. Instead, converse with them: suggest a structure, ask how many steps or states they want in their diagram, and request confirmation. Set actionTrigger to 'none' and provide your response in 'replyText'.
+3. Once you have a clear blueprint or if the user sends a direct instruction (e.g., "Add a login step", "Generate a BPMN of ticket sales", "Crie o fluxograma agora"), perform the creation or refactoring. In this case, set actionTrigger to 'generate' or 'refactor', construct a gorgeous diagram with nodes spaced 150px+ apart (spacing them out so they do not overlap on the grid canvas!), draw connections properly, and output the updated diagram structure inside the 'diagram' object. 
+4. Always build the 'htmlSystem' inside the diagram as a superb, fully interactive, visually spectacular prototype mockup app with form validations, mock record logs, stateful transitions and nice Tailwind components. When the user asks ONLY to change the interactive mockup application itself, you can set actionTrigger to 'prototype' and return the updated HTML string inside the 'htmlSystem' key of your response.
+
+Stay extremely friendly, professional, smart, and logical. Propose features and enhancements where appropriate.`;
+app.post("/api/chatbot-converse", async (req, res) => {
+  try {
+    const { messages, currentDiagram, diagramType, fileContent, fileName, fileExt } = req.body;
+    const ai = getAISDK(req);
+    let formattedPrompt = `You are talking with the user. The current active diagram structure is:
+${JSON.stringify(currentDiagram || "empty")}
+
+`;
+    formattedPrompt += `Preferred diagram type setting is: ${diagramType || "auto-detect"}.
+`;
+    if (fileContent) {
+      formattedPrompt += `The user has attached a file named "${fileName}" (Type: ${fileExt}). File content is:
+${fileContent}
+
+`;
+    }
+    formattedPrompt += `Chat history transcript:
+`;
+    messages.forEach((msg) => {
+      const senderName = msg.sender === "user" || msg.sender === "Voc\xEA" ? "User" : "Lyra Dev AI Assistant";
+      formattedPrompt += `${senderName}: ${msg.text}
+`;
+    });
+    formattedPrompt += `
+Remember, if you decide to act (create 'generate', modify 'refactor', or only update interactive UI 'prototype'), output the filled objects. If you are just discussing or clarifying, set actionTrigger to 'none' and do not add diagram or htmlSystem. Please respond in JSON strictly adhering to the schema.`;
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: formattedPrompt,
+      config: {
+        systemInstruction: CHAT_SYSTEM_INSTRUCTIONS,
+        responseMimeType: "application/json",
+        responseSchema: chatResponseSchema,
+        temperature: 0.2
+      }
+    });
+    const outputText = response.text;
+    if (!outputText) {
+      throw new Error("No response or empty text from Gemini API.");
+    }
+    const cleanedJson = JSON.parse(outputText.trim());
+    res.json({ success: true, ...cleanedJson });
+  } catch (error) {
+    console.error("Error in chatbot conversation:", error);
+    res.status(500).json({ success: false, error: error.message || error });
+  }
+});
 var SYSTEM_INSTRUCTIONS = `You are a world-class system architect and diagram generation specialist. 
 Your goal is to parse text prompts, uploaded source codes, markdown, BPMN XML, ER representations, D2 syntax, or mind maps, and outputs a complete, organized, animated diagram model in JSON along with a fully functioning mock-application prototype system.
 
